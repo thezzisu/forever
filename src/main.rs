@@ -2,7 +2,7 @@ use clap::Parser;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use warp::Filter;
 
@@ -82,6 +82,8 @@ async fn main() {
         restarts: 0,
     }));
 
+    let should_stop = Arc::new(Mutex::new(false));
+
     {
         let runtime_info = runtime_info.clone();
         let index = warp::get()
@@ -97,12 +99,27 @@ async fn main() {
         });
     }
 
+    {
+        let should_stop = should_stop.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::signal::ctrl_c().await.unwrap();
+                println!("Ctrl-c received!");
+                {
+                    let mut should_stop = should_stop.lock().unwrap();
+                    *should_stop = true;
+                }
+            }
+        });
+    }
+
     loop {
         println!("Running command: {}", args.command.join(" "));
         let mut child = Command::new(&args.command[0])
             .args(&args.command[1..])
             .spawn()
             .unwrap();
+
         {
             let mut runtime_info = runtime_info.write().unwrap();
             runtime_info.pid = child.id();
@@ -112,6 +129,7 @@ async fn main() {
                 .expect("Time went backwards")
                 .as_millis() as u64;
         }
+
         let status = child.wait().unwrap();
         println!("Command exited with status: {}", status);
         {
@@ -121,6 +139,13 @@ async fn main() {
                 .duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
                 .as_millis() as u64;
+        }
+
+        {
+            let should_stop = should_stop.lock().unwrap();
+            if *should_stop {
+                break;
+            }
         }
 
         save_log(
